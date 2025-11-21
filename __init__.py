@@ -1,8 +1,3 @@
-"""
-ComfyUI Mask Blend Node
-图像序列Mask渐变过渡节点
-"""
-
 import torch
 import numpy as np
 
@@ -143,6 +138,110 @@ class FrameSliceNode:
         return (sliced_images,)
 
 
+class MaskTransparentInOutNode:
+    """
+    创建首尾不透明度对称过渡的mask效果
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),  # 图像序列 [B, H, W, C]
+                "transparent_frames": ("INT", {
+                    "default": 10,
+                    "min": 0,
+                    "max": 10000,
+                    "step": 1,
+                    "display": "number"
+                }),
+            },
+            "optional": {
+                "input_mask": ("MASK",),  # 可选的输入mask [B, H, W]
+            },
+        }
+    
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("images", "masks")
+    FUNCTION = "generate_inout_mask"
+    CATEGORY = "mask/transitions"
+    
+    def generate_inout_mask(self, images, transparent_frames, input_mask=None):
+        """
+        生成首尾对称的透明度过渡mask序列
+        
+        Args:
+            images: 输入图像序列，torch.Tensor [B, H, W, C]
+            transparent_frames: 首尾过渡的帧数
+            input_mask: 可选的输入mask，如果提供则在此基础上应用过渡效果
+            
+        Returns:
+            images: 原始图像序列
+            masks: 生成的mask序列 [B, H, W]
+        """
+        # 获取图像序列的形状
+        batch_size, height, width, channels = images.shape
+        
+        # 如果提供了输入mask，使用输入mask作为基础；否则创建全白mask
+        if input_mask is not None:
+            # 确保input_mask的批次大小与images匹配
+            if input_mask.shape[0] != batch_size:
+                # 如果批次大小不匹配，扩展或截断mask
+                if input_mask.shape[0] < batch_size:
+                    # 如果mask帧数少，重复最后一帧
+                    last_mask = input_mask[-1:].expand(batch_size - input_mask.shape[0], -1, -1)
+                    masks = torch.cat([input_mask, last_mask], dim=0)
+                else:
+                    # 如果mask帧数多，截断
+                    masks = input_mask[:batch_size]
+            else:
+                masks = input_mask.clone()
+            
+            # 确保mask尺寸与图像匹配
+            if masks.shape[1] != height or masks.shape[2] != width:
+                # 需要调整mask尺寸
+                masks = torch.nn.functional.interpolate(
+                    masks.unsqueeze(1),  # [B, 1, H, W]
+                    size=(height, width),
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(1)  # [B, H, W]
+        else:
+            # 没有输入mask，创建全白mask
+            masks = torch.ones((batch_size, height, width), dtype=torch.float32, device=images.device)
+        
+        # 确保transparent_frames在有效范围内
+        transparent_frames = max(0, min(transparent_frames, batch_size // 2))
+        
+        # 如果transparent_frames为0，直接返回原始mask
+        if transparent_frames == 0:
+            return (images, masks)
+        
+        # 首部过渡：从0（黑色）到1（白色）
+        # 从第0帧到第transparent_frames - 1帧
+        for i in range(transparent_frames):
+            if i < batch_size:
+                # 计算当前帧的渐变系数（0.0到1.0）
+                gradient_value = i / (transparent_frames - 1) if transparent_frames > 1 else 1.0
+                # 在原mask基础上乘以渐变系数（灰度叠加）
+                masks[i] = masks[i] * gradient_value
+        
+        # 中间部分：从第transparent_frames帧到第batch_size - transparent_frames - 1帧
+        # 这部分保持原mask不变，无需处理
+        
+        # 尾部过渡：从1（白色）到0（黑色）
+        # 从第batch_size - transparent_frames帧到最后一帧
+        for i in range(transparent_frames):
+            frame_idx = batch_size - transparent_frames + i
+            if 0 <= frame_idx < batch_size:
+                # 计算当前帧的渐变系数（1.0到0.0），与首部对称
+                gradient_value = 1.0 - (i / (transparent_frames - 1) if transparent_frames > 1 else 0.0)
+                # 在原mask基础上乘以渐变系数（灰度叠加）
+                masks[frame_idx] = masks[frame_idx] * gradient_value
+        
+        return (images, masks)
+
+
 class SequenceOverlayNode:
     """
     将第一段图像序列按照mask叠加到第二段图像序列上
@@ -259,6 +358,7 @@ class SequenceOverlayNode:
 # 节点类映射
 NODE_CLASS_MAPPINGS = {
     "MaskGradientNode": MaskGradientNode,
+    "MaskTransparentInOutNode": MaskTransparentInOutNode,
     "FrameSliceNode": FrameSliceNode,
     "SequenceOverlayNode": SequenceOverlayNode,
 }
@@ -266,6 +366,7 @@ NODE_CLASS_MAPPINGS = {
 # 节点显示名称映射
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MaskGradientNode": "Mask Gradient (渐变过渡)",
+    "MaskTransparentInOutNode": "Mask Transparent In-Out (首尾透明过渡)",
     "FrameSliceNode": "Frame Slice (帧切片)",
     "SequenceOverlayNode": "Sequence Overlay (序列叠加)",
 }
